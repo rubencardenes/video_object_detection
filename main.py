@@ -5,6 +5,7 @@ from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from video_tools.config.settings import default_settings_path, load_settings, save_settings
+from video_tools.gui.icons import app_icon
 from video_tools.gui.main_window import MainWindow
 
 DARK_STYLESHEET = """
@@ -30,6 +31,9 @@ QSplitter::handle { background-color: #1a1a1a; }
 
 def main() -> None:
     app = QApplication(sys.argv)
+    # Sets the Dock icon on macOS even for an unbundled script (Qt6); otherwise
+    # macOS falls back to the generic white-document icon.
+    app.setWindowIcon(app_icon())
     app.setStyleSheet(DARK_STYLESHEET)
     # Let in-flight thumbnail/probe QRunnables finish before Qt tears down their
     # QObject signals on shutdown; otherwise a worker mid-emit on quit can hit

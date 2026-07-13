@@ -25,14 +25,14 @@ class MainWindow(QMainWindow):
         self._current_video: Path | None = None
 
         self.setWindowTitle("Video Tools")
-        self.resize(1100, 700)
+        self.resize(1100, 600)
 
         self._central_stack = QStackedWidget()
         placeholder = QLabel("Select a video from the sidebar to get started.")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._central_stack.addWidget(placeholder)
 
-        self._preview_panel = PreviewPanel()
+        self._preview_panel = PreviewPanel(settings)
         self._info_panel = InfoPanel(settings)
         self._convert_panel = ConvertPanel(settings)
         self._resize_panel = ResizePanel(settings)
@@ -75,7 +75,6 @@ class MainWindow(QMainWindow):
         self._fps_panel.load_video(path)
         self._cut_panel.load_video(path)
         self._preview_panel.load_video(path)
-        self._preview_panel.show_tool("Convert")
         self._central_stack.setCurrentWidget(self._preview_panel)
         self.video_selected.emit(path)
 

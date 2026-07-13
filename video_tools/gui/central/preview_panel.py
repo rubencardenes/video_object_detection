@@ -8,31 +8,34 @@ from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QButtonGroup,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QSlider,
     QStackedLayout,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from video_tools.core.detection import (
+from video_tools.config.settings import Settings, save_settings
+from video_tools.core.jobs import Worker
+from video_tools.detection import (
     DEFAULT_MODELS_DIR,
+    DetectionConfig,
     DetectionModel,
+    DetectionTrackingPipeline,
     annotate_frame,
-    find_onnx_model,
     frame_to_rgb_array,
     rgb_array_to_qimage,
 )
-from video_tools.core.jobs import Worker
+from video_tools.detection.model import resolve_model_path
 from video_tools.gui import icons
+from video_tools.gui.central.detection_settings_panel import DetectionSettingsPanel
 from video_tools.gui.widgets.trim_range_bar import TrimRangeBar
 
-# Tool buttons that swap the panel below them. Info is deliberately not one of
-# these: it opens in its own popup dialog instead (see info_clicked below).
+# Tool buttons in the bottom row. Each opens its parameters in a pop-up dialog
+# (show_tool); Info has the same behaviour but its dialog is owned by MainWindow.
 TOOL_NAMES = ("Convert", "Cut", "Resize", "FPS")
 TOOL_ICON_FUNCS = {
     "Convert": icons.convert_icon,
@@ -62,14 +65,15 @@ class PreviewPanel(QWidget):
 
     info_clicked = Signal()
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, settings: Settings, parent: QWidget | None = None):
         super().__init__(parent)
 
+        self._settings = settings
         self._player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
         self._player.setAudioOutput(self._audio_output)
         self._video_widget = QVideoWidget()
-        self._video_widget.setMinimumHeight(280)
+        self._video_widget.setMinimumHeight(200)
         # QVideoWidget does its own native/GPU video compositing. An app-wide
         # stylesheet auto-enables stylesheet background painting on every widget
         # (including this one), which fights that native paint path and can crash
@@ -91,12 +95,23 @@ class PreviewPanel(QWidget):
         self._video_stack.addWidget(self._detection_overlay)
         self._video_stack.setCurrentWidget(self._video_widget)
 
-        self._detection_model: DetectionModel | None = None
+        self._pipeline: DetectionTrackingPipeline | None = None
+        self._detection_config: DetectionConfig = settings.detection
         self._detection_model_load_attempted = False
         self._detection_busy = False
         self._detection_sink_connected = False
         self._resume_after_detection = False
         self._detection_frame_index = 0
+        # Filename the pipeline's model was loaded from, to detect model changes.
+        self._loaded_model_filename: str | None = None
+        self._pending_model_filename: str | None = None
+        # Config edited while a detection worker is in flight; applied between frames.
+        self._pending_config: DetectionConfig | None = None
+        # The playback state the user asked for. Detection throttles playback by
+        # pausing/resuming the player around every frame, which would otherwise
+        # make the Play/Pause button flicker; the button tracks this intent
+        # instead of the transient player state.
+        self._intended_playing = False
 
         self._play_button = QPushButton("Play")
         self._play_button.setIcon(icons.play_icon())
@@ -106,6 +121,12 @@ class PreviewPanel(QWidget):
         self._detect_button.setIcon(icons.detect_icon())
         self._detect_button.setCheckable(True)
         self._detect_button.toggled.connect(self._on_detect_toggled)
+
+        self._detect_settings_button = QPushButton()
+        self._detect_settings_button.setIcon(icons.settings_icon())
+        self._detect_settings_button.setToolTip("Detection settings")
+        self._detect_settings_button.clicked.connect(self._show_detection_settings)
+        self._detection_settings_dialog: QDialog | None = None
 
         self._position_slider = QSlider(Qt.Orientation.Horizontal)
         # sliderMoved only fires while actively dragging the handle; a plain click
@@ -122,6 +143,7 @@ class PreviewPanel(QWidget):
         self._player.positionChanged.connect(self._on_position_changed)
         self._player.durationChanged.connect(self._on_duration_changed)
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self._player.mediaStatusChanged.connect(self._on_media_status_changed)
 
         slider_column = QVBoxLayout()
         slider_column.setSpacing(2)
@@ -131,12 +153,10 @@ class PreviewPanel(QWidget):
         controls_row = QHBoxLayout()
         controls_row.addWidget(self._play_button)
         controls_row.addWidget(self._detect_button)
+        controls_row.addWidget(self._detect_settings_button)
         controls_row.addLayout(slider_column, stretch=1)
         controls_row.addWidget(self._time_label)
 
-        self._tool_buttons: dict[str, QPushButton] = {}
-        self._tool_button_group = QButtonGroup(self)
-        self._tool_button_group.setExclusive(True)
         button_row = QHBoxLayout()
 
         info_button = QPushButton("Info")
@@ -147,20 +167,21 @@ class PreviewPanel(QWidget):
         for name in TOOL_NAMES:
             button = QPushButton(name)
             button.setIcon(TOOL_ICON_FUNCS[name]())
-            button.setCheckable(True)
             button.clicked.connect(lambda checked=False, n=name: self.show_tool(n))
             button_row.addWidget(button)
-            self._tool_buttons[name] = button
-            self._tool_button_group.addButton(button)
+        button_row.addStretch(1)
 
-        self._tool_stack = QStackedWidget()
+        # Each tool's parameters live in a pop-up dialog (built lazily on first
+        # open) rather than an inline panel, keeping the main window compact.
         self._tool_panels: dict[str, QWidget] = {}
+        self._tool_dialogs: dict[str, QDialog] = {}
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
         layout.addWidget(self._video_container, stretch=1)
         layout.addLayout(controls_row)
         layout.addLayout(button_row)
-        layout.addWidget(self._tool_stack)
 
     @property
     def player(self) -> QMediaPlayer:
@@ -168,37 +189,74 @@ class PreviewPanel(QWidget):
 
     def register_panel(self, name: str, widget: QWidget) -> None:
         self._tool_panels[name] = widget
-        self._tool_stack.addWidget(widget)
 
     def show_tool(self, name: str) -> None:
         widget = self._tool_panels.get(name)
-        if widget is not None:
-            self._tool_stack.setCurrentWidget(widget)
-        button = self._tool_buttons.get(name)
-        if button is not None:
-            button.setChecked(True)
+        if widget is None:
+            return
+        dialog = self._tool_dialogs.get(name)
+        if dialog is None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle(name)
+            dialog_layout = QVBoxLayout(dialog)
+            dialog_layout.addWidget(widget)
+            self._tool_dialogs[name] = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def set_trim_range(self, start_sec: float, end_sec: float) -> None:
         self._trim_range_bar.set_range(start_sec * 1000, end_sec * 1000)
 
     def load_video(self, path: Path) -> None:
         self._player.stop()
+        self._intended_playing = False
+        self._update_play_button()
         self._detection_overlay.clear()
         self._detection_frame_index = 0
         self._detection_busy = False
         self._resume_after_detection = False
+        # Trackers hold onto the previous clip's boxes; drop them for the new video.
+        if self._pipeline is not None:
+            self._pipeline.reset()
         self._player.setSource(QUrl.fromLocalFile(str(path)))
 
     def _toggle_playback(self) -> None:
-        if self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            self._player.pause()
-        else:
+        self._set_playing(not self._intended_playing)
+
+    def _set_playing(self, playing: bool) -> None:
+        self._intended_playing = playing
+        if playing:
             self._player.play()
+        else:
+            # A pause requested by the user must also cancel any pending auto-resume
+            # from an in-flight detection, or the throttle would restart playback.
+            self._resume_after_detection = False
+            self._player.pause()
+        self._update_play_button()
+
+    def _update_play_button(self) -> None:
+        self._play_button.setText("Pause" if self._intended_playing else "Play")
+        self._play_button.setIcon(
+            icons.pause_icon() if self._intended_playing else icons.play_icon()
+        )
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
-        is_playing = state == QMediaPlayer.PlaybackState.PlayingState
-        self._play_button.setText("Pause" if is_playing else "Play")
-        self._play_button.setIcon(icons.pause_icon() if is_playing else icons.play_icon())
+        # Only the Stopped state (natural end of media, or an explicit stop())
+        # updates the button. Playing/Paused transitions are ignored because
+        # detection toggles them many times a second to throttle the ONNX loop;
+        # reacting to those is exactly what made the button flicker.
+        if state == QMediaPlayer.PlaybackState.StoppedState:
+            self._intended_playing = False
+            self._update_play_button()
+
+    def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        # When the clip ends, drop back to the Play state. Handled here (not only
+        # via StoppedState) because during detection the player is often sitting
+        # in PausedState from the per-frame throttle when the end is reached.
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._resume_after_detection = False
+            self._set_playing(False)
 
     def _on_slider_released(self) -> None:
         self._player.setPosition(self._position_slider.value())
@@ -233,14 +291,18 @@ class PreviewPanel(QWidget):
                 self._player.play()
 
     def _ensure_detection_model_loaded(self) -> None:
-        if self._detection_model is not None or self._detection_model_load_attempted:
+        if self._pipeline is not None or self._detection_model_load_attempted:
             return
         self._detection_model_load_attempted = True
-        model_path = find_onnx_model(DEFAULT_MODELS_DIR)
+        self._load_model(self._detection_config.model_filename)
+
+    def _load_model(self, filename: str | None) -> None:
+        model_path = resolve_model_path(filename, DEFAULT_MODELS_DIR)
         if model_path is None:
             logger.warning(f"No .onnx model found in {DEFAULT_MODELS_DIR}; detection disabled")
             self._disable_detection(f"No .onnx model found in {DEFAULT_MODELS_DIR}")
             return
+        self._pending_model_filename = model_path.name
         worker = Worker(DetectionModel, model_path)
         # Bound-method connection so Qt marshals the result back onto the GUI
         # thread instead of running the callback inline on the worker thread.
@@ -249,7 +311,13 @@ class PreviewPanel(QWidget):
         QThreadPool.globalInstance().start(worker)
 
     def _on_detection_model_loaded(self, model: object) -> None:
-        self._detection_model = model  # type: ignore[assignment]
+        detection_model: DetectionModel = model  # type: ignore[assignment]
+        if self._pipeline is None:
+            self._pipeline = DetectionTrackingPipeline(detection_model, self._detection_config)
+        else:
+            self._pipeline.set_model(detection_model)
+            self._pipeline.update_config(self._detection_config)
+        self._loaded_model_filename = self._pending_model_filename
 
     def _on_detection_model_load_error(self, message: str) -> None:
         logger.warning(f"Failed to load detection model: {message}")
@@ -259,6 +327,38 @@ class PreviewPanel(QWidget):
         self._detect_button.setChecked(False)
         self._detect_button.setEnabled(False)
         self._detect_button.setToolTip(reason)
+
+    def _show_detection_settings(self) -> None:
+        if self._detection_settings_dialog is None:
+            panel = DetectionSettingsPanel(self._detection_config)
+            panel.config_changed.connect(self._on_detection_config_changed)
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Detection settings")
+            layout = QVBoxLayout(dialog)
+            layout.addWidget(panel)
+            self._detection_settings_dialog = dialog
+        self._detection_settings_dialog.show()
+        self._detection_settings_dialog.raise_()
+        self._detection_settings_dialog.activateWindow()
+
+    def _on_detection_config_changed(self, config: DetectionConfig) -> None:
+        model_changed = config.model_filename != self._detection_config.model_filename
+        self._detection_config = config
+        self._settings.detection = config
+        save_settings(self._settings)
+        if self._pipeline is None:
+            return  # built with this config when detection is first switched on
+        if model_changed:
+            self._load_model(config.model_filename)  # reload; config applied on result
+        elif self._detection_busy:
+            self._pending_config = config  # applied between frames (see _on_video_frame_changed)
+        else:
+            self._pipeline.update_config(config)
+
+    def _apply_pending_config(self) -> None:
+        if self._pending_config is not None and self._pipeline is not None:
+            self._pipeline.update_config(self._pending_config)
+            self._pending_config = None
 
     def _connect_detection_sink(self) -> None:
         if self._detection_sink_connected:
@@ -278,8 +378,11 @@ class PreviewPanel(QWidget):
         self._detection_sink_connected = False
 
     def _on_video_frame_changed(self, frame: QVideoFrame) -> None:
-        if self._detection_model is None or self._detection_busy or not frame.isValid():
+        if self._pipeline is None or self._detection_busy or not frame.isValid():
             return
+        # Not busy here, so no worker is touching the pipeline: safe to apply a
+        # config change queued while the previous frame was still processing.
+        self._apply_pending_config()
         rgb = frame_to_rgb_array(frame)
         if rgb is None:
             return
@@ -300,9 +403,8 @@ class PreviewPanel(QWidget):
         QThreadPool.globalInstance().start(worker)
 
     def _run_detection(self, frame_rgb, frame_index: int) -> QImage:
-        assert self._detection_model is not None
-        detections = self._detection_model.infer(frame_rgb)
-        logger.info(f"Detection frame {frame_index}: {len(detections)} detection(s)")
+        assert self._pipeline is not None
+        detections = self._pipeline.process(frame_rgb)
         annotated = annotate_frame(frame_rgb, detections)
         return rgb_array_to_qimage(annotated)
 

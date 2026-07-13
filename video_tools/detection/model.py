@@ -6,8 +6,6 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 import supervision as sv
-from PySide6.QtGui import QImage
-from PySide6.QtMultimedia import QVideoFrame
 
 DEFAULT_MODELS_DIR = Path(__file__).resolve().parent.parent.parent / "models"
 
@@ -102,8 +100,12 @@ _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 DEFAULT_THRESHOLD = 0.5
 
-_box_annotator = sv.BoxAnnotator()
-_label_annotator = sv.LabelAnnotator()
+
+def list_onnx_models(models_dir: Path = DEFAULT_MODELS_DIR) -> list[str]:
+    """Return the filenames of every *.onnx model in models_dir (for the UI dropdown)."""
+    if not models_dir.is_dir():
+        return []
+    return [p.name for p in sorted(models_dir.glob("*.onnx"))]
 
 
 def find_onnx_model(models_dir: Path = DEFAULT_MODELS_DIR) -> Path | None:
@@ -112,6 +114,15 @@ def find_onnx_model(models_dir: Path = DEFAULT_MODELS_DIR) -> Path | None:
         return None
     matches = sorted(models_dir.glob("*.onnx"))
     return matches[0] if matches else None
+
+
+def resolve_model_path(filename: str | None, models_dir: Path = DEFAULT_MODELS_DIR) -> Path | None:
+    """Resolve a configured model filename to a path, falling back to the first available model."""
+    if filename:
+        candidate = models_dir / filename
+        if candidate.is_file():
+            return candidate
+    return find_onnx_model(models_dir)
 
 
 class DetectionModel:
@@ -168,29 +179,3 @@ class DetectionModel:
         xyxy *= np.array([width, height, width, height], dtype=np.float32)
 
         return sv.Detections(xyxy=xyxy, confidence=scores[keep], class_id=cls[keep].astype(int))
-
-
-def annotate_frame(frame_rgb: np.ndarray, detections: sv.Detections) -> np.ndarray:
-    labels = [COCO_CLASSES.get(int(class_id), str(class_id)) for class_id in detections.class_id]
-    annotated = _box_annotator.annotate(frame_rgb.copy(), detections)
-    annotated = _label_annotator.annotate(annotated, detections, labels)
-    return annotated
-
-
-def frame_to_rgb_array(frame: QVideoFrame) -> np.ndarray | None:
-    """Convert a QVideoFrame (as delivered by QVideoSink.videoFrameChanged) to an RGB ndarray."""
-    image = frame.toImage()
-    if image.isNull():
-        return None
-    image = image.convertToFormat(QImage.Format.Format_RGB888)
-    width, height, bytes_per_line = image.width(), image.height(), image.bytesPerLine()
-    arr = np.frombuffer(image.constBits(), dtype=np.uint8, count=image.sizeInBytes())
-    arr = arr.reshape((height, bytes_per_line))[:, : width * 3].reshape((height, width, 3))
-    return arr.copy()  # detach from the QImage's buffer before it's garbage collected
-
-
-def rgb_array_to_qimage(frame_rgb: np.ndarray) -> QImage:
-    frame_rgb = np.ascontiguousarray(frame_rgb)
-    height, width, _ = frame_rgb.shape
-    image = QImage(frame_rgb.data, width, height, frame_rgb.strides[0], QImage.Format.Format_RGB888)
-    return image.copy()  # detach from frame_rgb's buffer before it's garbage collected

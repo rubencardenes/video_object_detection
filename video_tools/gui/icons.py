@@ -1,221 +1,136 @@
 from __future__ import annotations
 
-import math
+from PySide6.QtCore import QByteArray, QRectF, Qt
+from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPen, QPixmap
-
-# Hand-drawn with QPainter rather than emoji or a bundled font/image icon set:
-# on this machine, color-emoji glyph rendering (Apple's CoreText/CG "sbix" bitmap
-# path) crashes with SIGBUS inside CopyEmojiImage while painting widget text (see
-# the crash reports in ~/Library/Logs/DiagnosticReports/python3.12-*.ips). Plain
-# QPainter primitives never touch that code path, so this is both crash-safe and
-# gives icons that actually match each action instead of generic OS dialog icons.
+# Icons are rendered from Lucide (https://lucide.dev, ISC license) SVG path data,
+# embedded below so the app needs no icon files or network access. We render the
+# SVG via QtSvg rather than drawing emoji/font glyphs: on this machine Apple's
+# color-emoji glyph path (CoreText/CG "sbix") crashes with SIGBUS inside
+# CopyEmojiImage while painting widget text (see crash reports under
+# ~/Library/Logs/DiagnosticReports/python3.12-*.ips). QtSvg never touches that
+# code path, so this is both crash-safe and gives a clean, consistent icon set.
 
 _COLOR = "#e6e6e6"
 _SIZE = 20
 
+# Lucide icons are authored on a 24x24 grid with a 2px round stroke.
+_SVG_TEMPLATE = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
+    'fill="{fill}" stroke="{stroke}" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round">{body}</svg>'
+)
 
-def _new_painter(size: int) -> tuple[QPixmap, QPainter]:
-    pixmap = QPixmap(size, size)
+# name -> inner SVG elements, taken verbatim from the Lucide source icons.
+_BODIES = {
+    "play": '<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>',
+    "pause": '<rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/>',
+    "info": '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    "repeat": '<path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/>',
+    "rotate-cw": '<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+    "scissors": '<circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/>',
+    "maximize-2": '<path d="M15 3h6v6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/><path d="M9 21H3v-6"/>',
+    "film": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18"/><path d="M3 7.5h4"/><path d="M3 12h18"/><path d="M3 16.5h4"/><path d="M17 3v18"/><path d="M17 7.5h4"/><path d="M17 16.5h4"/>',
+    "x": '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    "scan": '<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/>',
+    "settings": '<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>',
+    "folder": '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+}
+
+
+def _render(name: str, size: int, *, filled: bool = False) -> QIcon:
+    body = _BODIES[name]
+    svg = _SVG_TEMPLATE.format(fill=_COLOR if filled else "none", stroke=_COLOR, body=body)
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    # Render at 2x physical resolution, filling the whole pixmap via an explicit
+    # target rect, then tag it 2x so it displays crisp on retina. (Setting the
+    # device-pixel-ratio *before* rendering would double-apply the scale and clip
+    # the icon.)
+    scale = 2
+    pixmap = QPixmap(size * scale, size * scale)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(_COLOR)
-    pen.setWidthF(size * 0.09)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-    return pixmap, painter
-
-
-def _finish(pixmap: QPixmap, painter: QPainter) -> QIcon:
+    renderer.render(painter, QRectF(0, 0, size * scale, size * scale))
     painter.end()
+    pixmap.setDevicePixelRatio(scale)
     return QIcon(pixmap)
 
 
+# Purpose-built application icon (Dock / window / About). Unlike the toolbar
+# glyphs above this is a full-bleed "app tile": a rounded accent-blue square with
+# a white play triangle, so macOS shows something distinctive instead of the
+# generic document icon a bare Python script otherwise gets.
+_APP_ICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" '
+    'viewBox="0 0 1024 1024">'
+    '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'
+    '<stop offset="0" stop-color="#3a7ee0"/><stop offset="1" stop-color="#1f5bc0"/>'
+    "</linearGradient></defs>"
+    '<rect x="64" y="64" width="896" height="896" rx="200" fill="url(#g)"/>'
+    '<path d="M415 320a24 24 0 0 1 36-20.8l300 172a24 24 0 0 1 0 41.6l-300 172'
+    'A24 24 0 0 1 415 656z" fill="#ffffff"/>'
+    "</svg>"
+)
+
+
+def app_icon() -> QIcon:
+    """Distinctive application/Dock icon rendered from an embedded SVG."""
+    renderer = QSvgRenderer(QByteArray(_APP_ICON_SVG.encode("utf-8")))
+    icon = QIcon()
+    for px in (16, 32, 64, 128, 256, 512, 1024):
+        pixmap = QPixmap(px, px)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter, QRectF(0, 0, px, px))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
 def play_icon(size: int = _SIZE) -> QIcon:
-    pixmap, painter = _new_painter(size)
-    painter.setBrush(Qt.GlobalColor.transparent)
-    painter.setBrush(painter.pen().color())
-    painter.setPen(Qt.PenStyle.NoPen)
-    m = size * 0.22
-    triangle = QPainterPath()
-    triangle.moveTo(m, m * 0.9)
-    triangle.lineTo(size - m * 0.9, size / 2)
-    triangle.lineTo(m, size - m * 0.9)
-    triangle.closeSubpath()
-    painter.drawPath(triangle)
-    return _finish(pixmap, painter)
+    return _render("play", size, filled=True)
 
 
 def pause_icon(size: int = _SIZE) -> QIcon:
-    pixmap, painter = _new_painter(size)
-    painter.setBrush(painter.pen().color())
-    painter.setPen(Qt.PenStyle.NoPen)
-    bar_w = size * 0.18
-    m = size * 0.22
-    painter.drawRoundedRect(QRectF(m, m, bar_w, size - 2 * m), bar_w * 0.3, bar_w * 0.3)
-    painter.drawRoundedRect(
-        QRectF(size - m - bar_w, m, bar_w, size - 2 * m), bar_w * 0.3, bar_w * 0.3
-    )
-    return _finish(pixmap, painter)
+    return _render("pause", size, filled=True)
 
 
 def info_icon(size: int = _SIZE) -> QIcon:
-    pixmap, painter = _new_painter(size)
-    m = size * 0.12
-    painter.drawEllipse(QRectF(m, m, size - 2 * m, size - 2 * m))
-    painter.setBrush(painter.pen().color())
-    dot_r = size * 0.06
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawEllipse(QPointF(size / 2, size * 0.32), dot_r, dot_r)
-    painter.setPen(painter.pen())
-    pen = QPen(_COLOR)
-    pen.setWidthF(size * 0.1)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    painter.setPen(pen)
-    painter.drawLine(QPointF(size / 2, size * 0.47), QPointF(size / 2, size * 0.75))
-    return _finish(pixmap, painter)
+    return _render("info", size)
 
 
 def convert_icon(size: int = _SIZE) -> QIcon:
-    """Circular refresh arrow: a ~280-degree ring with one arrowhead."""
-    pixmap, painter = _new_painter(size)
-    painter.setBrush(Qt.GlobalColor.transparent)
-    r = size * 0.32
-    center = QPointF(size / 2, size / 2)
-    rect = QRectF(center.x() - r, center.y() - r, 2 * r, 2 * r)
-    start_deg, span_deg = 50.0, 280.0
-    painter.drawArc(rect, int(start_deg * 16), int(span_deg * 16))
-
-    # Qt angles: 0 deg = 3 o'clock, positive = counter-clockwise; screen y grows
-    # downward so the y-component of both position and tangent gets negated.
-    end_rad = math.radians(start_deg + span_deg)
-    ex = center.x() + r * math.cos(end_rad)
-    ey = center.y() - r * math.sin(end_rad)
-    tangent_rad = end_rad + math.pi / 2
-    tx, ty = math.cos(tangent_rad), -math.sin(tangent_rad)
-    nx, ny = -ty, tx  # perpendicular to the tangent, for the arrowhead's width
-
-    head = size * 0.2
-    tip = QPointF(ex + head * 0.5 * tx, ey + head * 0.5 * ty)
-    back_left = QPointF(ex - head * 0.5 * tx + head * 0.4 * nx, ey - head * 0.5 * ty + head * 0.4 * ny)
-    back_right = QPointF(ex - head * 0.5 * tx - head * 0.4 * nx, ey - head * 0.5 * ty - head * 0.4 * ny)
-
-    path = QPainterPath()
-    path.moveTo(tip)
-    path.lineTo(back_left)
-    path.lineTo(back_right)
-    path.closeSubpath()
-    painter.setBrush(painter.pen().color())
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawPath(path)
-    return _finish(pixmap, painter)
+    return _render("repeat", size)
 
 
 def cut_icon(size: int = _SIZE) -> QIcon:
-    """Scissors: two ring handles converging to a blade point."""
-    pixmap, painter = _new_painter(size)
-    tip = QPointF(size * 0.85, size * 0.5)
-    left_handle = QPointF(size * 0.22, size * 0.22)
-    right_handle = QPointF(size * 0.22, size * 0.78)
-    painter.drawLine(left_handle, tip)
-    painter.drawLine(right_handle, tip)
-    ring_r = size * 0.12
-    painter.setBrush(Qt.GlobalColor.transparent)
-    painter.drawEllipse(left_handle, ring_r, ring_r)
-    painter.drawEllipse(right_handle, ring_r, ring_r)
-    return _finish(pixmap, painter)
+    return _render("scissors", size)
 
 
 def resize_icon(size: int = _SIZE) -> QIcon:
-    """Diagonal double-headed arrow (expand/scale)."""
-    pixmap, painter = _new_painter(size)
-    start = QPointF(size * 0.22, size * 0.78)
-    end = QPointF(size * 0.78, size * 0.22)
-    painter.drawLine(start, end)
-    painter.setBrush(painter.pen().color())
-    painter.setPen(Qt.PenStyle.NoPen)
-    head = size * 0.15
-    top_head = QPainterPath()
-    top_head.moveTo(end.x(), end.y())
-    top_head.lineTo(end.x() - head, end.y())
-    top_head.lineTo(end.x(), end.y() + head)
-    top_head.closeSubpath()
-    painter.drawPath(top_head)
-    bot_head = QPainterPath()
-    bot_head.moveTo(start.x(), start.y())
-    bot_head.lineTo(start.x() + head, start.y())
-    bot_head.lineTo(start.x(), start.y() - head)
-    bot_head.closeSubpath()
-    painter.drawPath(bot_head)
-    return _finish(pixmap, painter)
+    return _render("maximize-2", size)
 
 
 def fps_icon(size: int = _SIZE) -> QIcon:
-    """Filmstrip: rounded rect with perforations along the edges."""
-    pixmap, painter = _new_painter(size)
-    m = size * 0.14
-    painter.setBrush(Qt.GlobalColor.transparent)
-    painter.drawRoundedRect(QRectF(m, m * 0.6, size - 2 * m, size - 1.2 * m), 2, 2)
-    hole = size * 0.07
-    painter.setBrush(painter.pen().color())
-    painter.setPen(Qt.PenStyle.NoPen)
-    for frac in (0.18, 0.42, 0.66, 0.9):
-        y = m * 0.6 + frac * (size - 1.2 * m)
-        painter.drawRect(QRectF(m * 0.35, y - hole / 2, hole, hole))
-        painter.drawRect(QRectF(size - m * 0.35 - hole, y - hole / 2, hole, hole))
-    return _finish(pixmap, painter)
+    return _render("film", size)
 
 
 def cancel_icon(size: int = _SIZE) -> QIcon:
-    pixmap, painter = _new_painter(size)
-    m = size * 0.26
-    painter.drawLine(QPointF(m, m), QPointF(size - m, size - m))
-    painter.drawLine(QPointF(size - m, m), QPointF(m, size - m))
-    return _finish(pixmap, painter)
+    return _render("x", size)
 
 
 def refresh_icon(size: int = _SIZE) -> QIcon:
-    return convert_icon(size)
+    return _render("rotate-cw", size)
 
 
 def detect_icon(size: int = _SIZE) -> QIcon:
-    """Four corner brackets, like a camera autofocus/viewfinder reticle."""
-    pixmap, painter = _new_painter(size)
-    painter.setBrush(Qt.GlobalColor.transparent)
-    m = size * 0.16
-    arm = size * 0.24
-    corners = [(m, m, 1, 1), (size - m, m, -1, 1), (m, size - m, 1, -1), (size - m, size - m, -1, -1)]
-    for x, y, dx, dy in corners:
-        painter.drawLine(QPointF(x, y), QPointF(x + arm * dx, y))
-        painter.drawLine(QPointF(x, y), QPointF(x, y + arm * dy))
-    dot_r = size * 0.08
-    painter.setBrush(painter.pen().color())
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawEllipse(QPointF(size / 2, size / 2), dot_r, dot_r)
-    return _finish(pixmap, painter)
+    return _render("scan", size)
+
+
+def settings_icon(size: int = _SIZE) -> QIcon:
+    return _render("settings", size)
 
 
 def folder_icon(size: int = _SIZE) -> QIcon:
-    pixmap, painter = _new_painter(size)
-    painter.setBrush(Qt.GlobalColor.transparent)
-    path = QPainterPath()
-    left = size * 0.15
-    top = size * 0.32
-    right = size * 0.85
-    bottom = size * 0.78
-    tab_w = size * 0.28
-    tab_h = size * 0.1
-    path.moveTo(left, bottom)
-    path.lineTo(left, top + tab_h)
-    path.lineTo(left + tab_w * 0.3, top + tab_h)
-    path.lineTo(left + tab_w * 0.5, top)
-    path.lineTo(left + tab_w, top)
-    path.lineTo(left + tab_w + tab_w * 0.3, top + tab_h)
-    path.lineTo(right, top + tab_h)
-    path.lineTo(right, bottom)
-    path.closeSubpath()
-    painter.drawPath(path)
-    return _finish(pixmap, painter)
+    return _render("folder", size)

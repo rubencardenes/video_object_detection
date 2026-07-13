@@ -15,10 +15,11 @@ from video_tools.gui.widgets.progress_widget import ProgressWidget
 
 
 class FfmpegTaskPanel(QWidget):
-    """Base class for Convert/Resize/FPS/Cut panels: form + Run button + progress wiring.
+    """Base class for Convert/Resize/FPS/Cut panels: form + Run button + progress.
 
-    Subclasses populate self.form_layout with their own fields and implement
-    output_suffix() and build_command(src, dst, ffmpeg).
+    Each panel is shown in its own pop-up dialog (opened from PreviewPanel's tool
+    row), so it is self-contained. Subclasses populate self.form_layout with their
+    own fields and implement output_suffix() and build_command(src, dst, ffmpeg).
     """
 
     def __init__(self, settings: Settings, parent: QWidget | None = None):
@@ -28,17 +29,16 @@ class FfmpegTaskPanel(QWidget):
         self._pending_ffmpeg: str | None = None
 
         self.form_layout = QFormLayout()
-
         self._run_button = QPushButton("Run")
         self._run_button.setIcon(icons.play_icon())
-        self._run_button.clicked.connect(self._on_run_clicked)
+        self._run_button.clicked.connect(self.run)
         self._progress_widget = ProgressWidget()
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(6)
         layout.addLayout(self.form_layout)
         layout.addWidget(self._run_button)
         layout.addWidget(self._progress_widget)
-        layout.addStretch(1)
 
     def load_video(self, path: Path) -> None:
         self._current_path = path
@@ -58,7 +58,7 @@ class FfmpegTaskPanel(QWidget):
         """
         return info.duration_sec
 
-    def _on_run_clicked(self) -> None:
+    def run(self) -> None:
         if self._current_path is None:
             return
         try:
