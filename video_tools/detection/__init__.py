@@ -18,6 +18,7 @@ _EXPORTS = {
     "list_onnx_models": "video_tools.detection.model",
     "resolve_model_path": "video_tools.detection.model",
     "DetectionTrackingPipeline": "video_tools.detection.pipeline",
+    "DetectionSaveJob": "video_tools.detection.save_job",
     "TRACKING_METHODS": "video_tools.detection.tracking",
     "available_methods": "video_tools.detection.tracking",
     "create_tracker": "video_tools.detection.tracking",
@@ -37,6 +38,7 @@ if TYPE_CHECKING:  # let type checkers/IDEs resolve the lazily-exported names
     from video_tools.detection.model import list_onnx_models as list_onnx_models
     from video_tools.detection.model import resolve_model_path as resolve_model_path
     from video_tools.detection.pipeline import DetectionTrackingPipeline as DetectionTrackingPipeline
+    from video_tools.detection.save_job import DetectionSaveJob as DetectionSaveJob
     from video_tools.detection.tracking import TRACKING_METHODS as TRACKING_METHODS
     from video_tools.detection.tracking import available_methods as available_methods
     from video_tools.detection.tracking import create_tracker as create_tracker

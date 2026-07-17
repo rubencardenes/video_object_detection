@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSlider,
     QStackedLayout,
@@ -20,10 +21,12 @@ from PySide6.QtWidgets import (
 
 from video_tools.config.settings import Settings, save_settings
 from video_tools.core.jobs import Worker
+from video_tools.core.naming import unique_suffixed_output_path
 from video_tools.detection import (
     DEFAULT_MODELS_DIR,
     DetectionConfig,
     DetectionModel,
+    DetectionSaveJob,
     DetectionTrackingPipeline,
     annotate_frame,
     frame_to_rgb_array,
@@ -32,6 +35,7 @@ from video_tools.detection import (
 from video_tools.detection.model import resolve_model_path
 from video_tools.gui import icons
 from video_tools.gui.central.detection_settings_panel import DetectionSettingsPanel
+from video_tools.gui.widgets.progress_widget import ProgressWidget
 from video_tools.gui.widgets.trim_range_bar import TrimRangeBar
 
 # Tool buttons in the bottom row. Each opens its parameters in a pop-up dialog
@@ -95,9 +99,16 @@ class PreviewPanel(QWidget):
         self._video_stack.addWidget(self._detection_overlay)
         self._video_stack.setCurrentWidget(self._video_widget)
 
+        self._current_path: Path | None = None
         self._pipeline: DetectionTrackingPipeline | None = None
+        self._detection_model: DetectionModel | None = None
         self._detection_config: DetectionConfig = settings.detection
         self._detection_model_load_attempted = False
+        # Offline "Detect & Save" job (writes an annotated copy to disk).
+        self._save_job: DetectionSaveJob | None = None
+        # Set when Detect & Save is clicked before the model has finished loading;
+        # the save starts as soon as the model arrives.
+        self._pending_save = False
         self._detection_busy = False
         self._detection_sink_connected = False
         self._resume_after_detection = False
@@ -121,6 +132,14 @@ class PreviewPanel(QWidget):
         self._detect_button.setIcon(icons.detect_icon())
         self._detect_button.setCheckable(True)
         self._detect_button.toggled.connect(self._on_detect_toggled)
+
+        # "&&" renders as a single literal "&" (a single "&" would be a mnemonic).
+        self._detect_save_button = QPushButton("Detect && Save")
+        self._detect_save_button.setIcon(icons.save_icon())
+        self._detect_save_button.setToolTip(
+            "Run detection over the whole video and save an annotated copy (no preview)"
+        )
+        self._detect_save_button.clicked.connect(self._on_detect_save_clicked)
 
         self._detect_settings_button = QPushButton()
         self._detect_settings_button.setIcon(icons.settings_icon())
@@ -153,9 +172,13 @@ class PreviewPanel(QWidget):
         controls_row = QHBoxLayout()
         controls_row.addWidget(self._play_button)
         controls_row.addWidget(self._detect_button)
+        controls_row.addWidget(self._detect_save_button)
         controls_row.addWidget(self._detect_settings_button)
         controls_row.addLayout(slider_column, stretch=1)
         controls_row.addWidget(self._time_label)
+
+        # Progress row for the offline Detect & Save job; hidden until one runs.
+        self._save_progress = ProgressWidget()
 
         button_row = QHBoxLayout()
 
@@ -181,6 +204,7 @@ class PreviewPanel(QWidget):
         layout.setSpacing(4)
         layout.addWidget(self._video_container, stretch=1)
         layout.addLayout(controls_row)
+        layout.addWidget(self._save_progress)
         layout.addLayout(button_row)
 
     @property
@@ -209,9 +233,13 @@ class PreviewPanel(QWidget):
         self._trim_range_bar.set_range(start_sec * 1000, end_sec * 1000)
 
     def load_video(self, path: Path) -> None:
+        self._current_path = path
         self._player.stop()
         self._intended_playing = False
         self._update_play_button()
+        # Leave a running save's progress row alone; only clear it when idle.
+        if self._save_job is None:
+            self._save_progress.reset()
         self._detection_overlay.clear()
         self._detection_frame_index = 0
         self._detection_busy = False
@@ -312,12 +340,17 @@ class PreviewPanel(QWidget):
 
     def _on_detection_model_loaded(self, model: object) -> None:
         detection_model: DetectionModel = model  # type: ignore[assignment]
+        self._detection_model = detection_model
         if self._pipeline is None:
             self._pipeline = DetectionTrackingPipeline(detection_model, self._detection_config)
         else:
             self._pipeline.set_model(detection_model)
             self._pipeline.update_config(self._detection_config)
         self._loaded_model_filename = self._pending_model_filename
+        # A Detect & Save click that arrived before the model was ready starts now.
+        if self._pending_save:
+            self._pending_save = False
+            self._start_detection_save()
 
     def _on_detection_model_load_error(self, message: str) -> None:
         logger.warning(f"Failed to load detection model: {message}")
@@ -327,6 +360,12 @@ class PreviewPanel(QWidget):
         self._detect_button.setChecked(False)
         self._detect_button.setEnabled(False)
         self._detect_button.setToolTip(reason)
+        self._detect_save_button.setEnabled(False)
+        self._detect_save_button.setToolTip(reason)
+        # Don't leave a queued Detect & Save waiting on a model that won't load.
+        if self._pending_save:
+            self._pending_save = False
+            QMessageBox.warning(self, "Detection unavailable", reason)
 
     def _show_detection_settings(self) -> None:
         if self._detection_settings_dialog is None:
@@ -430,3 +469,45 @@ class PreviewPanel(QWidget):
         if self._resume_after_detection:
             self._resume_after_detection = False
             self._player.play()
+
+    # --- Detect & Save (offline, no preview) --------------------------------
+
+    def _on_detect_save_clicked(self) -> None:
+        if self._current_path is None or self._save_job is not None:
+            return
+        # The offline save and live detection share one ONNX session/annotators;
+        # turn live detection off so they never run at the same time.
+        if self._detect_button.isChecked():
+            self._detect_button.setChecked(False)
+        self._ensure_detection_model_loaded()
+        if self._detection_model is None:
+            # Model still loading (or unavailable); start once it arrives, unless
+            # loading fails - _disable_detection clears this flag in that case.
+            self._pending_save = True
+            return
+        self._start_detection_save()
+
+    def _start_detection_save(self) -> None:
+        if self._current_path is None or self._detection_model is None:
+            return
+        dest = unique_suffixed_output_path(
+            self._current_path, "detected", self._settings.output_dir, ext="mp4"
+        )
+        job = DetectionSaveJob(
+            self._current_path, dest, self._detection_model, self._detection_config, parent=self
+        )
+        self._save_job = job
+        self._detect_save_button.setEnabled(False)
+        self._detect_button.setEnabled(False)
+        self._save_progress.bind(job)
+        job.finished.connect(self._on_save_finished)
+        job.start()
+
+    def _on_save_finished(self, success: bool, message: str) -> None:
+        self._save_job = None
+        self._detect_save_button.setEnabled(True)
+        self._detect_button.setEnabled(True)
+        if success:
+            QMessageBox.information(self, "Detection saved", message)
+        else:
+            QMessageBox.warning(self, "Detection save failed", message)
