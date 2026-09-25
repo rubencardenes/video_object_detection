@@ -17,6 +17,6 @@ class DetectionConfig:
 
     interval_frames: int = DEFAULT_INTERVAL_FRAMES  # frames tracked between detections
     method: str = DEFAULT_METHOD  # visual tracker: CSRT | KCF | MOSSE | MIL
-    model_filename: str | None = None  # .onnx name in models dir; None -> first found
+    model_filename: str | None = None  # joined to Settings.models_dir; None -> first found
     reacquire_pct: int = DEFAULT_REACQUIRE_PCT  # re-detect when < this % of objects still tracked
     confidence: float = DEFAULT_CONFIDENCE  # ONNX detection threshold

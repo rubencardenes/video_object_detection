@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from video_tools.config.settings import Settings, save_settings
+from video_tools.core.image_sequence import scan_image_sequences
 from video_tools.core.jobs import ThumbnailWorker
 from video_tools.gui import icons
 
@@ -29,7 +30,7 @@ def scan_videos(root: Path, extensions: tuple[str, ...], recursive: bool) -> lis
     matches = [
         p for p in root.glob(pattern) if p.is_file() and p.suffix.lower() in extensions
     ]
-    return sorted(matches)
+    return sorted(set(matches + scan_image_sequences(root, recursive)))
 
 
 class SidebarWidget(QWidget):
@@ -77,11 +78,13 @@ class SidebarWidget(QWidget):
 
     def reload(self) -> None:
         root = self._settings.videos_root
-        self._videos = scan_videos(root, self._settings.video_extensions, self._settings.recursive)
+        self._videos = scan_videos(
+            root, self._settings.video_extensions, self._settings.recursive
+        )
         if not root.exists():
             self._status_label.setText(f"Folder not found: {root}")
         elif not self._videos:
-            self._status_label.setText(f"No videos found in {root}")
+            self._status_label.setText(f"No videos or image sequences found in {root}")
         else:
             self._status_label.setText("")
         self._apply_filter(self._filter_edit.text())
@@ -99,7 +102,7 @@ class SidebarWidget(QWidget):
                 display = str(path)
             if needle and needle not in display.lower():
                 continue
-            item = QListWidgetItem(display)
+            item = QListWidgetItem(f"{display}/ [frames]" if path.is_dir() else display)
             icon = self._thumbnail_cache.get(path)
             if icon is not None:
                 item.setIcon(icon)
@@ -134,7 +137,7 @@ class SidebarWidget(QWidget):
 
     def _change_folder(self) -> None:
         directory = QFileDialog.getExistingDirectory(
-            self, "Choose videos folder", str(self._settings.videos_root)
+            self, "Choose videos / sequences folder", str(self._settings.videos_root)
         )
         if not directory:
             return

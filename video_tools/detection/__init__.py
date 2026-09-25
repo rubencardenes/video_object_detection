@@ -15,6 +15,7 @@ _EXPORTS = {
     "DEFAULT_MODELS_DIR": "video_tools.detection.model",
     "DetectionModel": "video_tools.detection.model",
     "find_onnx_model": "video_tools.detection.model",
+    "list_detection_models": "video_tools.detection.model",
     "list_onnx_models": "video_tools.detection.model",
     "resolve_model_path": "video_tools.detection.model",
     "DetectionTrackingPipeline": "video_tools.detection.pipeline",
@@ -35,6 +36,7 @@ if TYPE_CHECKING:  # let type checkers/IDEs resolve the lazily-exported names
     from video_tools.detection.model import DEFAULT_MODELS_DIR as DEFAULT_MODELS_DIR
     from video_tools.detection.model import DetectionModel as DetectionModel
     from video_tools.detection.model import find_onnx_model as find_onnx_model
+    from video_tools.detection.model import list_detection_models as list_detection_models
     from video_tools.detection.model import list_onnx_models as list_onnx_models
     from video_tools.detection.model import resolve_model_path as resolve_model_path
     from video_tools.detection.pipeline import DetectionTrackingPipeline as DetectionTrackingPipeline

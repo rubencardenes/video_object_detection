@@ -1,17 +1,21 @@
 # Copy this file to settings.yaml and adjust. settings.yaml itself is gitignored.
 videos_root: "/Users/ruben/Documents/Rubikom"
+models_dir: "~/data/models"
 # output_dir: null           # null/omitted = write outputs next to source file
 recursive: true
 video_extensions: [".mp4", ".mov", ".mkv", ".webm", ".avi"]
 # ffmpeg_path: /opt/homebrew/bin/ffmpeg   # override if ffmpeg isn't on PATH
 # ffprobe_path: /opt/homebrew/bin/ffprobe
 thumbnail_size: [160, 90]
+image_sequence_fps: 30       # fallback when a sequence has no seqinfo.ini
+image_cache_size: 24         # decoded frames retained in the bounded RAM cache
+log_frames: false            # true = log one Detect/Track line per processed frame
 
 # Detection / tracking (the "Detect" toggle in the preview panel). Editable in
 # the app via the gear button next to Detect; changes are saved back here.
 detection:
   interval_frames: 5      # frames to follow with the visual tracker between detections
   method: CSRT            # visual tracker: CSRT | KCF | MOSSE | MIL
-  model_filename: null    # .onnx name under models/; null = first one found
+  model_filename: null    # .onnx, .engine or .plan under models_dir; null prefers ONNX
   reacquire_pct: 50       # re-detect early when < this % of objects are still tracked
   confidence: 0.5         # detection confidence threshold (0-1)

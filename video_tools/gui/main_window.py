@@ -28,7 +28,7 @@ class MainWindow(QMainWindow):
         self.resize(1100, 600)
 
         self._central_stack = QStackedWidget()
-        placeholder = QLabel("Select a video from the sidebar to get started.")
+        placeholder = QLabel("Select a video or image sequence from the sidebar to get started.")
         placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._central_stack.addWidget(placeholder)
 
@@ -70,10 +70,11 @@ class MainWindow(QMainWindow):
         self._current_video = path
         logger.info(f"Selected video: {path}")
         self._info_panel.load_video(path)
-        self._convert_panel.load_video(path)
-        self._resize_panel.load_video(path)
-        self._fps_panel.load_video(path)
-        self._cut_panel.load_video(path)
+        if path.is_file():
+            self._convert_panel.load_video(path)
+            self._resize_panel.load_video(path)
+            self._fps_panel.load_video(path)
+            self._cut_panel.load_video(path)
         self._preview_panel.load_video(path)
         self._central_stack.setCurrentWidget(self._preview_panel)
         self.video_selected.emit(path)

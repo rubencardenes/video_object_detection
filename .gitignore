@@ -9,6 +9,9 @@ wheels/
 # macOS
 .DS_Store
 
+# Local application/session artifacts
+*.ses
+
 # Virtual environments
 .venv
 

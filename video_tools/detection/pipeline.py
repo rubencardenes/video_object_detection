@@ -41,9 +41,16 @@ class DetectionTrackingPipeline:
     time), which PreviewPanel already does via its _detection_busy guard.
     """
 
-    def __init__(self, model: DetectionModel, config: DetectionConfig):
+    def __init__(
+        self,
+        model: DetectionModel,
+        config: DetectionConfig,
+        log_frames: bool = False,
+    ):
+        self.last_inference_ms: float | None = None
         self._model = model
         self._config = config
+        self._log_frames = log_frames
         self._tracks: list[_Track] = []
         self._frames_since_detection = 0
         self._last_detection_count = 0
@@ -62,6 +69,7 @@ class DetectionTrackingPipeline:
         self._last_detection_count = 0
 
     def process(self, frame_rgb: np.ndarray) -> sv.Detections:
+        self.last_inference_ms = None
         need_detect = (
             not self._tracks or self._frames_since_detection >= self._config.interval_frames
         )
@@ -69,18 +77,30 @@ class DetectionTrackingPipeline:
             detections = self._update_trackers(frame_rgb)
             survivors, last = len(detections), self._last_detection_count
             if last and survivors / last * 100 < self._config.reacquire_pct:
-                logger.info(f"Tracker kept {survivors}/{last} objects; re-detecting early")
+                if self._log_frames:
+                    logger.info(
+                        f"Tracker kept {survivors}/{last} objects; re-detecting early"
+                    )
                 need_detect = True
 
         if need_detect:
             detections = self._model.infer(frame_rgb, threshold=self._config.confidence)
-            self._init_trackers(frame_rgb, detections)
+            self.last_inference_ms = self._model.last_inference_ms
+            if self._config.interval_frames > 0:
+                self._init_trackers(frame_rgb, detections)
+            else:
+                self._tracks = []
             self._frames_since_detection = 0
             self._last_detection_count = len(detections)
-            logger.info(f"Detect: {len(detections)} object(s)")
+            if self._log_frames:
+                logger.info(f"Detect: {len(detections)} object(s)")
         else:
             self._frames_since_detection += 1
-            logger.debug(f"Track: {len(detections)} object(s) (frame +{self._frames_since_detection})")
+            if self._log_frames:
+                logger.debug(
+                    f"Track: {len(detections)} object(s) "
+                    f"(frame +{self._frames_since_detection})"
+                )
 
         return detections
 
@@ -134,7 +154,9 @@ class DetectionTrackingPipeline:
         )
 
     @staticmethod
-    def _clamp_to_xywh(box: np.ndarray, width: int, height: int) -> tuple[int, int, int, int] | None:
+    def _clamp_to_xywh(
+        box: np.ndarray, width: int, height: int
+    ) -> tuple[int, int, int, int] | None:
         x1, y1, x2, y2 = box
         x1 = int(max(0, min(x1, width - 1)))
         y1 = int(max(0, min(y1, height - 1)))
