@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from video_tools.detection.config import DetectionConfig
-from video_tools.detection.model import DEFAULT_MODELS_DIR, list_onnx_models
+from video_tools.detection.model import list_detection_models
 from video_tools.detection.tracking import available_methods
 
 
@@ -25,15 +26,20 @@ class DetectionSettingsPanel(QWidget):
 
     config_changed = Signal(DetectionConfig)
 
-    def __init__(self, config: DetectionConfig, parent: QWidget | None = None):
+    def __init__(
+        self,
+        config: DetectionConfig,
+        models_dir: Path,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self._config = config
         self._emitting = True  # suppress signals while populating initial values
 
         self._interval_spin = QSpinBox()
-        self._interval_spin.setRange(1, 120)
+        self._interval_spin.setRange(0, 120)
         self._interval_spin.setToolTip(
-            "How many frames to follow with the visual tracker between ONNX detections."
+            "Frames to track between detections; 0 runs detection only, without trackers."
         )
 
         self._method_combo = QComboBox()
@@ -41,7 +47,7 @@ class DetectionSettingsPanel(QWidget):
         self._method_combo.addItems(methods)
 
         self._model_combo = QComboBox()
-        models = list_onnx_models(DEFAULT_MODELS_DIR)
+        models = list_detection_models(models_dir)
         # Empty string entry = "use the first model found" (config.model_filename None).
         self._model_combo.addItem("(auto)", userData=None)
         for name in models:
@@ -55,8 +61,8 @@ class DetectionSettingsPanel(QWidget):
         )
 
         self._confidence_spin = QDoubleSpinBox()
-        self._confidence_spin.setRange(0.05, 0.95)
-        self._confidence_spin.setSingleStep(0.05)
+        self._confidence_spin.setRange(0.01, 0.99)
+        self._confidence_spin.setSingleStep(0.01)
         self._confidence_spin.setDecimals(2)
 
         form = QFormLayout(self)
@@ -76,13 +82,24 @@ class DetectionSettingsPanel(QWidget):
         self._emitting = False
 
     def _load(self, config: DetectionConfig) -> None:
+        self._config = config
         self._interval_spin.setValue(config.interval_frames)
-        if config.method in [self._method_combo.itemText(i) for i in range(self._method_combo.count())]:
+        methods = [
+            self._method_combo.itemText(i)
+            for i in range(self._method_combo.count())
+        ]
+        if config.method in methods:
             self._method_combo.setCurrentText(config.method)
         model_index = self._model_combo.findData(config.model_filename)
         self._model_combo.setCurrentIndex(model_index if model_index >= 0 else 0)
         self._reacquire_spin.setValue(config.reacquire_pct)
         self._confidence_spin.setValue(config.confidence)
+
+    def set_config(self, config: DetectionConfig) -> None:
+        """Synchronize controls after the model is changed in the main window."""
+        self._emitting = True
+        self._load(config)
+        self._emitting = False
 
     def _on_changed(self, *_args) -> None:
         if self._emitting:

@@ -15,22 +15,28 @@ DEFAULT_SETTINGS_PATH = Path(__file__).resolve().parent.parent.parent / "setting
 
 DEFAULT_VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".webm", ".avi")
 DEFAULT_THUMBNAIL_SIZE = (160, 90)
+DEFAULT_MODELS_DIR = Path("~/data/models").expanduser()
 
 
 @dataclass
 class Settings:
     videos_root: Path
+    models_dir: Path = field(default_factory=lambda: DEFAULT_MODELS_DIR)
     output_dir: Path | None = None
     recursive: bool = True
     video_extensions: tuple[str, ...] = field(default=DEFAULT_VIDEO_EXTENSIONS)
     ffmpeg_path: str | None = None
     ffprobe_path: str | None = None
     thumbnail_size: tuple[int, int] = field(default=DEFAULT_THUMBNAIL_SIZE)
+    image_sequence_fps: float = 30.0
+    image_cache_size: int = 24
+    log_frames: bool = False
     detection: DetectionConfig = field(default_factory=DetectionConfig)
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data["videos_root"] = str(self.videos_root)
+        data["models_dir"] = str(self.models_dir)
         data["output_dir"] = str(self.output_dir) if self.output_dir else None
         data["video_extensions"] = list(self.video_extensions)
         data["thumbnail_size"] = list(self.thumbnail_size)
@@ -45,12 +51,16 @@ class Settings:
         )
         return cls(
             videos_root=Path(data.get("videos_root") or "").expanduser(),
+            models_dir=Path(data.get("models_dir") or DEFAULT_MODELS_DIR).expanduser(),
             output_dir=Path(data["output_dir"]).expanduser() if data.get("output_dir") else None,
             recursive=bool(data.get("recursive", True)),
             video_extensions=tuple(data.get("video_extensions") or DEFAULT_VIDEO_EXTENSIONS),
             ffmpeg_path=data.get("ffmpeg_path") or None,
             ffprobe_path=data.get("ffprobe_path") or None,
             thumbnail_size=tuple(data.get("thumbnail_size") or DEFAULT_THUMBNAIL_SIZE),
+            image_sequence_fps=float(data.get("image_sequence_fps", 30.0)),
+            image_cache_size=max(1, int(data.get("image_cache_size", 24))),
+            log_frames=bool(data.get("log_frames", False)),
             detection=detection,
         )
 
@@ -77,6 +87,8 @@ def load_settings(path: Path = DEFAULT_SETTINGS_PATH) -> Settings:
         settings = Settings(videos_root=Path.home())
     if not settings.videos_root.exists():
         logger.warning(f"Configured videos_root does not exist: {settings.videos_root}")
+    if not settings.models_dir.exists():
+        logger.warning(f"Configured models_dir does not exist: {settings.models_dir}")
     return settings
 
 

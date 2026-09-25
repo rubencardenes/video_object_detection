@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool
@@ -7,6 +8,7 @@ from PySide6.QtWidgets import QFormLayout, QLabel, QWidget
 
 from video_tools.config.settings import Settings
 from video_tools.core.jobs import Worker
+from video_tools.core.image_sequence import ImageSequence, is_image_sequence
 from video_tools.core.metadata import VideoInfo, probe_video
 
 
@@ -61,6 +63,30 @@ class InfoPanel(QWidget):
         self._path = path
         for label in self._fields.values():
             label.setText("Loading...")
+
+        if is_image_sequence(path):
+            try:
+                sequence = ImageSequence(
+                    path,
+                    cache_size=1,
+                    default_fps=self._settings.image_sequence_fps,
+                )
+                first = sequence.frame(0)
+                total_size = sum(frame.stat().st_size for frame in sequence.frame_paths)
+                self._fields["path"].setText(str(path))
+                self._fields["duration"].setText(_format_duration(len(sequence) / sequence.fps))
+                self._fields["resolution"].setText(f"{first.shape[1]} x {first.shape[0]}")
+                self._fields["fps"].setText(f"{sequence.fps:.2f}")
+                self._fields["codec"].setText("Image sequence")
+                self._fields["format"].setText(f"{len(sequence)} frames")
+                self._fields["bit_rate"].setText("n/a")
+                self._fields["size"].setText(_format_size(total_size))
+                self._fields["created"].setText(
+                    datetime.datetime.fromtimestamp(path.stat().st_ctime).strftime("%Y-%m-%d %H:%M")
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                self._on_error(str(exc))
+            return
 
         worker = Worker(probe_video, path, self._settings.ffprobe_path)
         worker.signals.result.connect(self._on_info_loaded)
